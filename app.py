@@ -2,7 +2,32 @@ import streamlit as st
 import pandas as pd
 import requests
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderUnavailable
+import datetime
 
+# --- This is the new, robust function ---
+# Use @st.cache_data to save results.
+# add show_spinner=False to not show the "Running..." message for this function
+@st.cache_data(show_spinner="Locating addresses...")
+def get_coordinates(geolocator, address):
+    """
+    Safely gets coordinates for an address, with caching and error handling.
+    Returns (lat, lon) or (None, None) if not found.
+    """
+    try:
+        location = geolocator.geocode(address)
+        if location:
+            return location.latitude, location.longitude
+        else:
+            return None, None
+    except GeocoderUnavailable:
+        st.error(f"Geocoding service is unavailable. Could not find: {address}")
+        return None, None
+    except Exception as e:
+        st.error(f"An error occurred during geocoding: {e}")
+        return None, None
+
+# --- Main App Logic ---
 
 st.markdown("""
 # 🚖 Taxi Fare Prediction
@@ -11,75 +36,53 @@ st.markdown("""
 """)
 
 # Ask user for date
-import datetime
-
 d = st.date_input(
     "Schedule your ride:",
     datetime.date(2025, 11, 15))
-st.write('Date of departure:', d)
 
 # Ask user for time
-import datetime
-
 t = st.time_input('Select pickup time:', datetime.time(10, 00))
-
-st.write('Time of departure:', t)
 
 # Combining pickup date and time
 pickup_datetime = datetime.datetime.combine(d, t)
 
-# Ask user for the PICKUP LOCATION
 # Initialize the geolocator
-geolocator = Nominatim(user_agent="taxifare_lewagon_project")
+geolocator = Nominatim(user_agent="taxifare_prediction_app")
 
-# Define the address you want to geocode
+# --- Updated Pickup Location Logic ---
 pickup_address = st.text_input('Please type your pickup location', '20 West 34th Street, New York, NY')
+pickup_latitude, pickup_longitude = get_coordinates(geolocator, pickup_address)
 
-# Geocode the address
-pickup_location = geolocator.geocode(pickup_address)
-pickup_latitude = pickup_location.latitude
-pickup_longitude = pickup_location.longitude
+# STOP the app if the address is not found
+if not pickup_latitude or not pickup_longitude:
+    st.warning("Could not find pickup address. Please try a different one.")
+    st.stop() # Stops the script from running further
 
 st.write('Pickup Latitude and Longitude:', pickup_latitude, pickup_longitude)
 
-# Ask user for the DROPOFF LOCATION
-# Define the address you want to geocode
-dropoff = st.text_input('Please type your destination', '33 E 17th St, New York, NY')
+# --- Updated Dropoff Location Logic ---
+dropoff_address = st.text_input('Please type your destination', '33 E 17th St, New York, NY')
+dropoff_latitude, dropoff_longitude = get_coordinates(geolocator, dropoff_address)
 
-# Geocode the address
-dropoff = geolocator.geocode(dropoff)
-dropoff_latitude = dropoff.latitude
-dropoff_longitude = dropoff.longitude
+# STOP the app if the address is not found
+if not dropoff_latitude or not dropoff_longitude:
+    st.warning("Could not find destination address. Please try a different one.")
+    st.stop() # Stops the script from running further
 
-st.write('Destiantion Latitude and Longitude:', dropoff_latitude, dropoff_longitude)
+st.write('Destination Latitude and Longitude:', dropoff_latitude, dropoff_longitude)
+
 
 # Ask user for total number of passengers
-def get_select_box_data():
-
-    return pd.DataFrame({
-          'number_of_passengers': list(range(1, 5)),
-        })
-
-df = get_select_box_data()
-
-passenger_count = st.selectbox('Choose the number of passengers that will join the ride:', df['number_of_passengers'])
-
+passenger_count = st.selectbox('Choose the number of passengers:', list(range(1, 9)), index=0)
 st.write('Total number of passengers:', passenger_count)
 
 
 # Creating a Map
-# 1. Create a new DataFrame with one point (Manhattan)
-def get_select_box_data():
-
-    return pd.DataFrame({
-          'lat': [pickup_latitude, dropoff_latitude],
-          'lon': [pickup_longitude, dropoff_longitude]
-        })
-
-taxifare_map = get_select_box_data()
-
-# 2. Pass this new DataFrame to st.map
-st.map(data=taxifare_map, zoom=11)
+map_data = pd.DataFrame({
+    'lat': [pickup_latitude, dropoff_latitude],
+    'lon': [pickup_longitude, dropoff_longitude]
+})
+st.map(data=map_data, zoom=11)
 
 
 # Defining model url
@@ -96,14 +99,18 @@ params = {
 }
 
 # Making an API call
-response = requests.get(url, params=params)
-result = response.json()
-fare = result.get('fare')
+try:
+    response = requests.get(url, params=params)
+    response.raise_for_status() # Raises an error for bad responses (4xx or 5xx)
+    result = response.json()
+    fare = result.get('fare')
 
-# Retrieving prediction result
-st.header("💵 Estimated Fare")
-if fare:
-    st.success(f"Estimated Fare: **${fare:.2f}**")
-    st.caption("This is an approximation based on historical NYC taxi data.")
-else:
-    st.error("The API did not return a valid fare.")
+    # Retrieving prediction result
+    st.header("💵 Estimated Fare")
+    if fare:
+        st.success(f"Estimated Fare: **${fare:.2f}**")
+        st.caption("This is an approximation based on historical NYC taxi data.")
+    else:
+        st.error("The API returned a valid response but no fare. Check prediction logic.")
+except requests.exceptions.RequestException as e:
+    st.error(f"Failed to call the prediction API: {e}")
